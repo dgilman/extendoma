@@ -11,6 +11,8 @@ to the long contiguous straight runs of the streets. Numbered streets with no
 run on the grid are imputed. N-S streets are measured in all of Douglas County.
 E-W names come only from east of 72nd Street, where the base grid is not
 changed by the West Dodge / West Maple / West Center transitions.
+South of Harrison Street (the county line), the E-W grid continues with
+artificial streets named after the presidents after William Henry Harrison.
 Diagnostics go to stderr.
 """
 
@@ -51,6 +53,20 @@ ISOLATED_GAP = 3  # E-W streets more slots apart than this are in separate group
 ISOLATED_GROUP = 3  # a group with fewer E-W streets than this is small
 ISOLATED_MIN_M = 1000  # a street in a small group must be this long
 WEST_LIMIT = 72  # E-W streets only east of this numbered street
+# Named ways of these classes make a name "used" in Omaha.
+STREET_CLASSES = ROAD_CLASSES + ("motorway", "motorway_link", "trunk_link",
+                                 "primary_link", "secondary_link",
+                                 "tertiary_link", "service", "pedestrian")
+SOUTH_OF = "Harrison Street"  # the artificial E-W streets start south of this
+# The presidents after William Henry Harrison, in order. A president with
+# non-contiguous terms (Cleveland, Trump) is in the list one time only.
+PRESIDENTS = ("Tyler", "Polk", "Taylor", "Fillmore", "Pierce", "Buchanan",
+              "Lincoln", "Johnson", "Grant", "Hayes", "Garfield", "Arthur",
+              "Cleveland", "Harrison", "McKinley", "Roosevelt", "Taft",
+              "Wilson", "Harding", "Coolidge", "Hoover", "Roosevelt",
+              "Truman", "Eisenhower", "Kennedy", "Johnson", "Nixon", "Ford",
+              "Carter", "Reagan", "Bush", "Clinton", "Bush", "Obama",
+              "Orange Cheeto", "Biden")
 
 NUMBERED = re.compile(r"^(?:North|South) ((\d+)(?:st|nd|rd|th) Street)$")
 DIRECTIONAL = re.compile(r"^(?:North|South|East|West) ")
@@ -89,6 +105,30 @@ def fetch_ways():
       AND ST_Intersects(h.geometry, c.geometry);
     """
     return run_sql(sql)
+
+
+def fetch_street_names():
+    """All street names in Douglas County, with no geometry."""
+    xmin, ymin, xmax, ymax = COUNTY_BBOX
+    classes = ", ".join(f"'{c}'" for c in STREET_CLASSES)
+    sql = f"""
+    LOAD spatial;
+    SET geometry_always_xy = true;
+    WITH county AS (
+      SELECT geometry FROM '{BOUNDARIES}'
+      WHERE id = {DOUGLAS_COUNTY_ID}
+        AND bbox.xmin > {xmin} AND bbox.xmax < {xmax}
+        AND bbox.ymin > {ymin} AND bbox.ymax < {ymax}
+    )
+    SELECT DISTINCT h.name
+    FROM '{HIGHWAYS}' h, county c
+    WHERE h.bbox.xmax >= {xmin} AND h.bbox.xmin <= {xmax}
+      AND h.bbox.ymax >= {ymin} AND h.bbox.ymin <= {ymax}
+      AND h.name IS NOT NULL
+      AND h.highway IN ({classes})
+      AND ST_Intersects(h.geometry, c.geometry);
+    """
+    return [r["name"] for r in run_sql(sql)]
 
 
 def linestrings(geom):
@@ -395,6 +435,32 @@ def name_ew(grid, runs):
     return slots
 
 
+def add_presidents(slots, street_names):
+    """Adds artificial E-W streets in the slots south of SOUTH_OF, named after
+    PRESIDENTS. A surname is not used if Omaha has a street named
+    "<surname> Street" (Lincoln Boulevard does not stop Lincoln), and each
+    surname is used one time only."""
+    k = min(k for k, name in slots.items() if name == SOUTH_OF)
+    used = set()
+    for surname in PRESIDENTS:
+        if surname in used:
+            log(f"  E-W: {surname} not used, the name is already used south "
+                f"of {SOUTH_OF}")
+            continue
+        same = re.compile(rf"(?:{DIRECTIONAL.pattern})?{surname} Street",
+                          re.IGNORECASE)
+        existing = sorted(n for n in street_names if same.fullmatch(n))
+        if existing:
+            log(f"  E-W: {surname} not used, Omaha has {', '.join(existing)}")
+            continue
+        k -= 1
+        while k in slots:
+            k -= 1
+        slots[k] = f"{surname} Street"
+        used.add(surname)
+        log(f"  E-W: {surname} Street added at slot {k}")
+
+
 def main():
     ways = fetch_ways()
     log(f"{len(ways)} named ways in Douglas County")
@@ -425,6 +491,8 @@ def main():
     log(f"E-W grid: {ew.step * KY:.2f} m per street, "
         f"{1609.344 / (ew.step * KY):.3f} streets per mile")
     slots = name_ew(ew, ew_runs)
+    log(f"E-W: artificial streets south of {SOUTH_OF}:")
+    add_presidents(slots, fetch_street_names())
 
     lat_s, lat_n = ew.at(min(slots)), ew.at(max(slots))
     lon_w, lon_e = lon_limit, ns[n_min].lon
