@@ -1,9 +1,17 @@
 #!/opt/local/bin/python3.14
 """Derive the base street grid of east Omaha from OpenStreetMap.
 
-Reads the OSM layercake parquet files with the duckdb CLI and writes to stdout:
-    [{"name": "90th Street", "points": [[lat, lon], [lat, lon]]}, ...]
-The two points of each street set its great circle.
+Reads the OSM layercake parquet files with the duckdb CLI and writes a JSON
+object to stdout:
+    {"ns": [...], "ew": [...], "ns_nominal": [...], "ew_nominal": [...],
+     "continuation": {"east": {...}, "west": {...}, "north": {...},
+                      "south": {...}}}
+Each list has items {"name": "90th Street", "points": [[lat, lon], [lat, lon]]}.
+The two points of each street set its great circle. "ns" is in order from
+east to west (1st Street first) and "ew" from north to south. The "_nominal"
+lists have the same streets, with the nominal spacings in US survey feet.
+"continuation" tells how the grid continues past its last line in each
+direction.
 
 The output is a regular grid: N-S lines (meridians) at a fixed spacing per
 street number, and E-W lines (parallels) at a fixed spacing. The grid is fitted
@@ -38,6 +46,7 @@ _A, _E2 = 6378137.0, 0.00669437999014
 _W = math.sqrt(1 - _E2 * math.sin(math.radians(LAT0)) ** 2)
 KX = _A / _W * math.cos(math.radians(LAT0)) * math.pi / 180  # longitude
 KY = _A * (1 - _E2) / _W ** 3 * math.pi / 180  # latitude
+FT = 1200 / 3937  # metres per US survey foot. Diagnostics are in feet.
 
 MAX_BEARING_DEG = 3  # a segment must be this near to N-S or E-W
 CLUSTER_TOL_M = 30  # joins the two carriageways of a divided road
@@ -62,6 +71,17 @@ NS_AVENUES = (48, 49, 50, 51, 60, 65)
 # Manual N-S fix: put a street on the line between two other streets. In Benson,
 # 52nd to 60th Street is a regular grid except 55th and 57th.
 NS_REGRID = {55: (52, 60), 57: (52, 60)}
+# Nominal grids, in US survey feet (see SESSION_NOTES.md). Between two N-S
+# anchors, the lines are evenly spaced over the nominal width of the section.
+NOMINAL_FT_PER_NUMBER = ((12, 360), (24, 344), (None, 440))  # (below, ft)
+NOMINAL_EW_FT = 330  # 5 chains, 1/16 mile
+# PLSS range lines (6-mile columns of townships). Scaled to the 40N baseline,
+# they are 72, 66, 60 and 54 miles east of the 6th Principal Meridian. Each
+# range was surveyed on its own: the nominal N-S grid has each range line at
+# its regular place, and the west column of each range takes the error.
+RANGE_LINES = (60, 132, 204, 276)
+NOMINAL_PIN_EW = "Dodge Street"  # the nominal E-W grid has this street at
+                                 # its regular place
 # Manual E-W fixes, from a review of the output on the map.
 EW_NORTH_LIMIT = "Young Street"  # remove this street and all streets north
 EW_RENAMES = {"Mary Street": "Titus Avenue"}
@@ -351,7 +371,7 @@ def build_ns(runs):
         moved = [n for n in nums
                  if n in by_num and not on_grid(n, grid_lon(n), step)]
         regular = all(longest[n].length < ANCHOR_MIN_M for n in moved)
-        log(f"  {label}: {-step * KX:5.1f} m/number, "
+        log(f"  {label}: {-step * KX / FT:5.1f} ft/number, "
             + ("regular" if regular else "IRREGULAR, measured positions")
             + (f"; off the grid: {moved}" if moved else ""))
         for n in nums:
@@ -388,7 +408,7 @@ def build_ns(runs):
     for n in added:
         out[n] = NSStreet(n, lon[end] + (n - end) * step, "imputed")
     if added:
-        log(f"  {added[0]:>3}-{EAST_FIRST:<3}: {-step * KX:5.1f} m/number, "
+        log(f"  {added[0]:>3}-{EAST_FIRST:<3}: {-step * KX / FT:5.1f} ft/number, "
             "added east of the grid")
     return out
 
@@ -435,11 +455,12 @@ def name_ew(grid, runs):
             if label:
                 frac = grid.slot(max((r for r in runs if r.name == name),
                                      key=lambda r: r.length).mc) - k
-                log(f"  E-W: {name} is {label} ({frac:+.2f} step, {length:.0f} m), "
+                log(f"  E-W: {name} is {label} ({frac:+.2f} step, "
+                    f"{length / FT:.0f} ft), "
                     "put in the empty slot")
     for name, k, length in lost:
         if name not in used:
-            log(f"  E-W: {name} ({length:.0f} m) not used, "
+            log(f"  E-W: {name} ({length / FT:.0f} ft) not used, "
                 f"its slot has {slots[k]}")
     # Outside the main block of streets, a small group of nearby streets
     # (for example, a subdivision in the north) must be long to be a grid road.
@@ -455,7 +476,7 @@ def name_ew(grid, runs):
         if len(grp) < ISOLATED_GROUP:
             for k in grp:
                 if length_of[k] < ISOLATED_MIN_M:
-                    log(f"  E-W: {slots[k]} ({length_of[k]:.0f} m) removed, "
+                    log(f"  E-W: {slots[k]} ({length_of[k] / FT:.0f} ft) removed, "
                         "a short street away from the grid")
                     del slots[k]
     ks = sorted(slots)
@@ -509,6 +530,129 @@ def add_presidents(slots, street_names):
         log(f"  E-W: {surname} Street added at slot {k}")
 
 
+def nominal_ft_per_number(n):
+    """The nominal N-S spacing east or west of street number n."""
+    for below, ft in NOMINAL_FT_PER_NUMBER:
+        if below is None or n < below:
+            return ft
+
+
+def nominal_grid(ns, slots, ew_lat):
+    """The grid with the nominal spacings in US survey feet.
+
+    N-S: the nominal width of a section between two anchors is its number of
+    streets times nominal_ft_per_number(). The lines in the section, avenues
+    included, are evenly spaced over that width. In Benson this gives 330 ft,
+    because 48th-60th Street has 16 lines in one mile. The ends of the grid
+    (1st Street and the last street) are also section ends.
+    Each range line in RANGE_LINES is at its regular place, and the nominal
+    widths go west from it. The lines of the west column of a range (the last
+    mile before the next range line) are evenly spaced between the nominal
+    position of its east line and the next range line. East of the first
+    range line and west of the last one, the nominal widths go out from it.
+    Returns ({number: lon}, {slot: lat}).
+    """
+    keys = sorted(ns)
+    ends = sorted({n for n, st in ns.items() if st.how == "anchor"}
+                  | {keys[0], keys[-1]})
+    pos = {ends[0]: 0.0}  # feet west of the east end
+    for a, b in zip(ends, ends[1:]):
+        width = (b - a) * nominal_ft_per_number(a)
+        lines = [n for n in keys if a <= n <= b]
+        for i, n in enumerate(lines):
+            pos[n] = pos[a] + width * i / (len(lines) - 1)
+    ranges = [r for r in RANGE_LINES if r in ns]
+
+    def from_pin(r, n):  # nominal widths out from range line r
+        return ns[r].lon - (pos[n] - pos[r]) * FT / KX
+
+    ns_nom = {r: ns[r].lon for r in ranges}
+    for n in keys:
+        if n <= ranges[0]:
+            ns_nom[n] = from_pin(ranges[0], n)
+        elif n >= ranges[-1]:
+            ns_nom[n] = from_pin(ranges[-1], n)
+    for east, west in zip(ranges, ranges[1:]):
+        col = west - 12  # the east line of the west column
+        for n in keys:
+            if east < n <= col:
+                ns_nom[n] = from_pin(east, n)
+        lines = [n for n in keys if col <= n <= west]
+        for i, n in enumerate(lines[1:-1], 1):
+            ns_nom[n] = (ns_nom[col] + (ns[west].lon - ns_nom[col])
+                         * i / (len(lines) - 1))
+        log(f"  nominal range {east}-{west}: west column {col}-{west} is "
+            f"{(ns_nom[col] - ns[west].lon) * KX / FT:.0f} ft (nominal 5280)")
+
+    k0 = next(k for k, name in slots.items() if name == NOMINAL_PIN_EW)
+    step = NOMINAL_EW_FT * FT / KY
+    ew_nom = {k: ew_lat[k0] + (k - k0) * step for k in slots}
+    return ns_nom, ew_nom
+
+
+def ns_lines(ns, lon, lat):
+    """N-S lines, east to west, over the latitudes of the E-W streets."""
+    lat_s, lat_n = min(lat.values()), max(lat.values())
+    return [line(ns[n].name, (lat_s, lon[n]), (lat_n, lon[n]))
+            for n in sorted(ns)]
+
+
+def ew_lines(slots, lat, lon):
+    """E-W lines, north to south, from WEST_LIMIT to the east end."""
+    lon_w, lon_e = lon[WEST_LIMIT], lon[min(lon)]
+    return [line(slots[k], (lat[k], lon_w), (lat[k], lon_e))
+            for k in sorted(slots, reverse=True)]
+
+
+def line(name, a, b):
+    return {"name": name,
+            "points": [[round(c, 6) for c in a], [round(c, 6) for c in b]]}
+
+
+def continuation(ns, lon, slots, ew_step):
+    """How the grid continues past its last line in each direction.
+
+    The spacing is the nominal value in US survey feet. "measured_ft" is the
+    spacing of the regular grid at that end (N-S) or of the whole E-W grid,
+    for comparison. N-S lines are meridians and E-W lines are parallels.
+    """
+    keys = sorted(ns)
+    east, west = keys[0], keys[-1]
+    k_n, k_s = max(slots), min(slots)
+
+    def ns_end(end, other, direction, next_name):
+        step_ft = abs(lon[end] - lon[other]) / abs(end - other) * KX / FT
+        ft = nominal_ft_per_number(end if direction == "east" else end - 1)
+        return {"from": ns[end].name, "direction": direction, "lines": "N-S",
+                "spacing_ft": ft, "spacing_m": round(ft * FT, 3),
+                "spacing_deg": round(ft * FT / KX, 8),
+                "measured_ft": round(step_ft, 1), "next": next_name,
+                "description": f"N-S lines (meridians) every {ft} ft to the "
+                               f"{direction} of {ns[end].name}: {next_name}, "
+                               "and so on."}
+
+    def ew_end(k, direction):
+        ft = NOMINAL_EW_FT
+        return {"from": slots[k], "direction": direction, "lines": "E-W",
+                "spacing_ft": ft, "spacing_m": round(ft * FT, 3),
+                "spacing_deg": round(ft * FT / KY, 8),
+                "measured_ft": round(ew_step * KY / FT, 1),
+                "description": f"E-W lines (parallels) every {ft} ft to the "
+                               f"{direction} of {slots[k]}."}
+
+    # The 6 numbers next to each end, to measure the regular spacing there.
+    east_ref = min(n for n in keys if n >= east + 6 and n == int(n))
+    west_ref = max(n for n in keys if n <= west - 6 and n == int(n))
+    return {
+        "east": ns_end(east, east_ref, "east",
+                       f"{ordinal(int(east) - 1)} Street"),
+        "west": ns_end(west, west_ref, "west",
+                       f"{ordinal(int(west) + 1)} Street"),
+        "north": ew_end(k_n, "north"),
+        "south": ew_end(k_s, "south"),
+    }
+
+
 def main():
     ways = fetch_ways()
     log(f"{len(ways)} named ways in Douglas County")
@@ -542,27 +686,25 @@ def main():
     ew_runs = all_runs(group_segments(
         ways, keep=lambda axis, seg: axis == "EW" and seg.q[0] >= lon_limit))
     ew = fit_ew(ew_runs)
-    log(f"E-W grid: {ew.step * KY:.2f} m per street, "
-        f"{1609.344 / (ew.step * KY):.3f} streets per mile")
+    log(f"E-W grid: {ew.step * KY / FT:.2f} ft per street, "
+        f"{5280 * FT / (ew.step * KY):.3f} streets per mile")
     slots = name_ew(ew, ew_runs)
     fix_ew(slots)
     log(f"E-W: artificial streets south of {SOUTH_OF}:")
     add_presidents(slots, fetch_street_names())
 
-    lat_s, lat_n = ew.at(min(slots)), ew.at(max(slots))
-    lon_w, lon_e = lon_limit, ns[n_min].lon
-
-    def line(name, a, b):
-        return {"name": name,
-                "points": [[round(c, 6) for c in a], [round(c, 6) for c in b]]}
-
-    out = [line(ns[n].name, (lat_s, ns[n].lon), (lat_n, ns[n].lon))
-           for n in sorted(ns)]
-    out += [line(slots[k], (ew.at(k), lon_w), (ew.at(k), lon_e))
-            for k in sorted(slots, reverse=True)]
-    json.dump(out, sys.stdout, indent=1)
+    ns_lon = {n: st.lon for n, st in ns.items()}
+    ew_lat = {k: ew.at(k) for k in slots}
+    ns_nom, ew_nom = nominal_grid(ns, slots, ew_lat)
+    result = {
+        "ns": ns_lines(ns, ns_lon, ew_lat),
+        "ew": ew_lines(slots, ew_lat, ns_lon),
+        "ns_nominal": ns_lines(ns, ns_nom, ew_nom),
+        "ew_nominal": ew_lines(slots, ew_nom, ns_nom),
+        "continuation": continuation(ns, ns_lon, slots, ew.step),
+    }
+    json.dump(result, sys.stdout, indent=1)
     print()
-
 
 if __name__ == "__main__":
     main()
