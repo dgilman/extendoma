@@ -3,8 +3,9 @@
 
 Usage: make_grid_view.py [omaha_grid.json [grid_view.html]]
 
-The HTML embeds the grid data and draws each street's great circle, extended
-far past its two points, over OpenStreetMap tiles. Serve it over http (e.g.
+The HTML embeds the grid data and draws each street far past its two points,
+over OpenStreetMap tiles: a N-S street (a meridian) as its great circle, and
+an E-W street as its parallel of latitude. A parallel is not a great circle. Serve it over http (e.g.
 python3.14 -m http.server); OSM does not send tiles to a file:// page.
 
 The input is the object from extract_grid.py ({"ns", "ew", "ns_nominal",
@@ -67,6 +68,21 @@ function greatCircle(p, q) {
   return pts;
 }
 
+// Samples of the parallel of latitude lat, centered on longitude lon.
+function parallel(lat, lon) {
+  const half = deg(HALF_LEN / (R * Math.cos(rad(lat))));
+  const pts = [];
+  for (let d = -half; d <= half; d += half / (HALF_LEN / STEP)) pts.push([lat, lon + d]);
+  return pts;
+}
+
+// The full line of a street. An E-W street is a parallel: "kind" says so in
+// the new format; in the old format, its two points have the same latitude.
+function curve({kind, points: [p, q]}) {
+  const isParallel = kind ? kind === 'parallel' : p[0] === q[0];
+  return isParallel ? parallel(p[0], (p[1] + q[1]) / 2) : greatCircle(p, q);
+}
+
 // {modes: {regular: {ns, ew}, nominal?: {ns, ew}}, continuation}, from the
 // object format or from the older list of streets.
 function normalize(g) {
@@ -90,8 +106,9 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 
 const NS_COLOR = '#d7191c', EW_COLOR = '#2c7bb6';
 
-function addStreet(group, segments, {name, points: [p, q]}, color) {
-  L.polyline(greatCircle(p, q), {color, weight: 1, opacity: 0.7})
+function addStreet(group, segments, street, color) {
+  const {name, points: [p, q]} = street;
+  L.polyline(curve(street), {color, weight: 1, opacity: 0.7})
     .bindTooltip(name, {sticky: true}).addTo(group);
   L.polyline([p, q], {color, weight: 5, opacity: 0.6})
     .bindTooltip(name, {sticky: true}).addTo(segments);
@@ -105,9 +122,10 @@ function addContinuation(group, streets, c) {
   const color = c.lines === 'N-S' ? NS_COLOR : EW_COLOR;
   for (let i = 1; i <= CONT_COUNT; i++) {
     const d = sign * i * c.spacing_deg;
-    const [p, q] = ref.points.map(([lat, lon]) =>
+    const points = ref.points.map(([lat, lon]) =>
       c.lines === 'N-S' ? [lat, lon + d] : [lat + d, lon]);
-    L.polyline(greatCircle(p, q), {color, weight: 1.5, opacity: 0.8, dashArray: '6 6'})
+    const kind = c.lines === 'N-S' ? 'meridian' : 'parallel';
+    L.polyline(curve({kind, points}), {color, weight: 1.5, opacity: 0.8, dashArray: '6 6'})
       .bindTooltip(`${c.direction} of ${c.from}, +${i} (${c.spacing_ft} ft)`, {sticky: true})
       .addTo(group);
   }

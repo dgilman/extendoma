@@ -6,8 +6,12 @@ object to stdout:
     {"ns": [...], "ew": [...], "ns_nominal": [...], "ew_nominal": [...],
      "continuation": {"east": {...}, "west": {...}, "north": {...},
                       "south": {...}}}
-Each list has items {"name": "90th Street", "points": [[lat, lon], [lat, lon]]}.
-The two points of each street set its great circle. "ns" is in order from
+Each item of "ns" is {"name": "90th Street", "kind": "meridian", "lon": lon,
+"points": [[lat, lon], [lat, lon]]}: a meridian, which is a great circle
+through the two points. Each item of "ew" is {"name": "Dodge Street",
+"kind": "parallel", "lat": lat, "points": [...]}: a parallel of latitude, which
+is a small circle and not a great circle. (A great circle through two points
+of a parallel is 170 m from it at 50 km.) "ns" is in order from
 east to west (1st Street first) and "ew" from north to south. The "_nominal"
 lists have the same streets, with the nominal spacings in US survey feet.
 "continuation" tells how the grid continues past its last line in each
@@ -593,19 +597,22 @@ def nominal_grid(ns, slots, ew_lat):
 def ns_lines(ns, lon, lat):
     """N-S lines, east to west, over the latitudes of the E-W streets."""
     lat_s, lat_n = min(lat.values()), max(lat.values())
-    return [line(ns[n].name, (lat_s, lon[n]), (lat_n, lon[n]))
+    return [line(ns[n].name, "meridian", "lon", lon[n],
+                 (lat_s, lon[n]), (lat_n, lon[n]))
             for n in sorted(ns)]
 
 
 def ew_lines(slots, lat, lon):
     """E-W lines, north to south, from WEST_LIMIT to the east end."""
     lon_w, lon_e = lon[WEST_LIMIT], lon[min(lon)]
-    return [line(slots[k], (lat[k], lon_w), (lat[k], lon_e))
+    return [line(slots[k], "parallel", "lat", lat[k],
+                 (lat[k], lon_w), (lat[k], lon_e))
             for k in sorted(slots, reverse=True)]
 
 
-def line(name, a, b):
-    return {"name": name,
+def line(name, kind, key, value, a, b):
+    """A street: a meridian (key "lon") or a parallel (key "lat")."""
+    return {"name": name, "kind": kind, key: round(value, 6),
             "points": [[round(c, 6) for c in a], [round(c, 6) for c in b]]}
 
 
