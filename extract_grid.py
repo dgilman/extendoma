@@ -53,6 +53,14 @@ ISOLATED_GAP = 3  # E-W streets more slots apart than this are in separate group
 ISOLATED_GROUP = 3  # a group with fewer E-W streets than this is small
 ISOLATED_MIN_M = 1000  # a street in a small group must be this long
 WEST_LIMIT = 72  # E-W streets only east of this numbered street
+EAST_FIRST = 1  # the N-S grid continues east to this numbered street
+# Manual E-W fixes, from a review of the output on the map.
+EW_NORTH_LIMIT = "Young Street"  # remove this street and all streets north
+EW_RENAMES = {"Mary Street": "Titus Avenue"}
+EW_FILL = (  # (street, street, name for the one empty slot between them)
+    ("O Street", "P Street", "Ohern Street"),
+    ("Arbor Street", "Bancroft Street", "Gold Street"),
+)
 # Named ways of these classes make a name "used" in Omaha.
 STREET_CLASSES = ROAD_CLASSES + ("motorway", "motorway_link", "trunk_link",
                                  "primary_link", "secondary_link",
@@ -361,6 +369,18 @@ def build_ns(runs):
             last = max(found, key=lambda n: n * direction)
             nums = range(end + direction, last + direction, direction)
             place(nums, grid_lon, step, f"{end:>3}-{last:<3}")
+
+    # East of the last street on the grid, continue the downtown step to
+    # EAST_FIRST. 2nd and 3rd Streets are off the grid, and 1st Street is not
+    # in the data.
+    end, other = anchors[0], anchors[1]
+    step = (lon[end] - lon[other]) / (end - other)
+    added = range(min(out) - 1, EAST_FIRST - 1, -1)
+    for n in added:
+        out[n] = NSStreet(n, lon[end] + (n - end) * step, "imputed")
+    if added:
+        log(f"  {added[0]:>3}-{EAST_FIRST:<3}: {-step * KX:5.1f} m/number, "
+            "added east of the grid")
     return out
 
 
@@ -435,6 +455,25 @@ def name_ew(grid, runs):
     return slots
 
 
+def fix_ew(slots):
+    """Applies the manual E-W fixes."""
+    slot_of = {name: k for k, name in slots.items()}
+    north = slot_of[EW_NORTH_LIMIT]
+    for k in [k for k in slots if k >= north]:
+        log(f"  E-W: {slots.pop(k)} removed, north of the grid")
+    for old, new in EW_RENAMES.items():
+        slots[slot_of[old]] = new
+        log(f"  E-W: {old} renamed {new}")
+    for a, b, name in EW_FILL:
+        lo, hi = sorted((slot_of[a], slot_of[b]))
+        gap = [k for k in range(lo + 1, hi) if k not in slots]
+        assert len(gap) == 1, f"no single empty slot between {a} and {b}"
+        for k in [k for k, n in slots.items() if n == name]:
+            del slots[k]
+        slots[gap[0]] = name
+        log(f"  E-W: {name} added between {a} and {b}")
+
+
 def add_presidents(slots, street_names):
     """Adds artificial E-W streets in the slots south of SOUTH_OF, named after
     PRESIDENTS. A surname is not used if Omaha has a street named
@@ -491,6 +530,7 @@ def main():
     log(f"E-W grid: {ew.step * KY:.2f} m per street, "
         f"{1609.344 / (ew.step * KY):.3f} streets per mile")
     slots = name_ew(ew, ew_runs)
+    fix_ew(slots)
     log(f"E-W: artificial streets south of {SOUTH_OF}:")
     add_presidents(slots, fetch_street_names())
 
