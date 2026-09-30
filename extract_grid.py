@@ -33,8 +33,11 @@ ROAD_CLASSES = ("trunk", "primary", "secondary", "tertiary", "unclassified",
 
 # Local equirectangular projection, only to classify and measure segments.
 LAT0, LON0 = 41.26, -96.0
-KX = 111320 * math.cos(math.radians(LAT0))  # metres per degree of longitude
-KY = 111047  # metres per degree of latitude
+# Metres per degree on the WGS84 ellipsoid at LAT0.
+_A, _E2 = 6378137.0, 0.00669437999014
+_W = math.sqrt(1 - _E2 * math.sin(math.radians(LAT0)) ** 2)
+KX = _A / _W * math.cos(math.radians(LAT0)) * math.pi / 180  # longitude
+KY = _A * (1 - _E2) / _W ** 3 * math.pi / 180  # latitude
 
 MAX_BEARING_DEG = 3  # a segment must be this near to N-S or E-W
 CLUSTER_TOL_M = 30  # joins the two carriageways of a divided road
@@ -54,6 +57,11 @@ ISOLATED_GROUP = 3  # a group with fewer E-W streets than this is small
 ISOLATED_MIN_M = 1000  # a street in a small group must be this long
 WEST_LIMIT = 72  # E-W streets only east of this numbered street
 EAST_FIRST = 1  # the N-S grid continues east to this numbered street
+# Manual N-S fix: "<n>th Avenue" halfway between the nth and (n+1)th Streets.
+NS_AVENUES = (48, 49, 50, 51, 60, 65)
+# Manual N-S fix: put a street on the line between two other streets. In Benson,
+# 52nd to 60th Street is a regular grid except 55th and 57th.
+NS_REGRID = {55: (52, 60), 57: (52, 60)}
 # Manual E-W fixes, from a review of the output on the map.
 EW_NORTH_LIMIT = "Young Street"  # remove this street and all streets north
 EW_RENAMES = {"Mary Street": "Titus Avenue"}
@@ -309,8 +317,9 @@ class Grid:
 
 
 class NSStreet:
-    def __init__(self, num, lon, how):
+    def __init__(self, num, lon, how, name=None):
         self.num, self.lon, self.how = num, lon, how
+        self.name = name or f"{ordinal(num)} Street"
 
 
 def build_ns(runs):
@@ -516,7 +525,13 @@ def main():
     log("N-S sections:")
     ns = build_ns(ns_runs)
     n_min, n_max = min(ns), max(ns)
-    for how in ("anchor", "grid", "imputed", "measured"):
+    for n, (a, b) in NS_REGRID.items():
+        ns[n] = NSStreet(n, ns[a].lon + (n - a) * (ns[b].lon - ns[a].lon) / (b - a),
+                         "manual")
+    for n in NS_AVENUES:
+        ns[n + 0.5] = NSStreet(n + 0.5, (ns[n].lon + ns[n + 1].lon) / 2,
+                               "manual", f"{ordinal(n)} Avenue")
+    for how in ("anchor", "grid", "imputed", "measured", "manual"):
         nums = sorted(n for n, st in ns.items() if st.how == how)
         log(f"  {how}: {len(nums)}" + (f" {nums}" if how != "grid" else ""))
     missing = [n for n in range(n_min, n_max) if n not in ns]
@@ -541,7 +556,7 @@ def main():
         return {"name": name,
                 "points": [[round(c, 6) for c in a], [round(c, 6) for c in b]]}
 
-    out = [line(f"{ordinal(n)} Street", (lat_s, ns[n].lon), (lat_n, ns[n].lon))
+    out = [line(ns[n].name, (lat_s, ns[n].lon), (lat_n, ns[n].lon))
            for n in sorted(ns)]
     out += [line(slots[k], (ew.at(k), lon_w), (ew.at(k), lon_e))
             for k in sorted(slots, reverse=True)]
