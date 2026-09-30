@@ -5,11 +5,16 @@ Reads the OSM layercake parquet files with the duckdb CLI and writes to stdout:
     [{"name": "90th Street", "points": [[lat, lon], [lat, lon]]}, ...]
 The two points of each street set its great circle.
 
-N-S numbered streets come from all of Douglas County. E-W named streets come
-only from east of 72nd Street, where the base grid is not changed by the
-West Dodge / West Maple / West Center transitions. Diagnostics go to stderr.
+The output is a regular grid: N-S lines (meridians) at a fixed spacing per
+street number, and E-W lines (parallels) at a fixed spacing. The grid is fitted
+to the long contiguous straight runs of the streets. Numbered streets with no
+run on the grid are imputed. N-S streets are measured in all of Douglas County.
+E-W names come only from east of 72nd Street, where the base grid is not
+changed by the West Dodge / West Maple / West Center transitions.
+Diagnostics go to stderr.
 """
 
+import cmath
 import json
 import math
 import re
@@ -33,8 +38,19 @@ MAX_BEARING_DEG = 3  # a segment must be this near to N-S or E-W
 CLUSTER_TOL_M = 30  # joins the two carriageways of a divided road
 MAX_GAP_M = 60  # a larger gap along the street ends a contiguous run
 MIN_RUN_M = 300
-LONG_RUN_M = 1500  # runs used to measure the standard N-S spacing
-ANCHOR_NS = 72
+ANCHOR_EVERY = 6  # the mile and half-mile roads anchor the N-S grid
+ANCHOR_MIN_M = 1500  # an anchor road needs a contiguous run this long
+# N-S streets are measured only south of this latitude, if they exist there.
+# North of about 41.30 (Fort Street), the roads west of 132nd Street move west
+# by 15-50 m.
+NS_LAT_MIN, NS_LAT_MAX = COUNTY_BBOX[1], 41.30
+ON_GRID_TOL = 0.25  # a run is on the grid within this fraction of a step
+OFF_GRID_MIN_M = 600  # an off-grid street must be this long to fill a slot
+EW_MIN_M, EW_MAX_M = 80, 130  # range searched for the E-W spacing
+ISOLATED_GAP = 3  # E-W streets more slots apart than this are in separate groups
+ISOLATED_GROUP = 3  # a group with fewer E-W streets than this is small
+ISOLATED_MIN_M = 1000  # a street in a small group must be this long
+WEST_LIMIT = 72  # E-W streets only east of this numbered street
 
 NUMBERED = re.compile(r"^(?:North|South) ((\d+)(?:st|nd|rd|th) Street)$")
 DIRECTIONAL = re.compile(r"^(?:North|South|East|West) ")
@@ -133,7 +149,7 @@ def street_key(name, axis):
 
 
 class Run:
-    """A long contiguous part of one street, with a fitted center line."""
+    """A long contiguous part of one street."""
 
     def __init__(self, axis, name, num, segs):
         self.axis, self.name, self.num = axis, name, num
@@ -141,23 +157,10 @@ class Run:
         self.a2 = max(s.a2 for s in segs)
         self.length = self.a2 - self.a1
         w = sum(s.length for s in segs)
-        self.cross = sum(s.cross * s.length for s in segs) / w
-        # Center line, in degrees: lon = f(lat) for N-S, lat = f(lon) for E-W.
-        # The slope is the mean direction of the segments, not a fit of their
-        # positions, so that a jog in the street does not tilt the line.
-        self.i = i = 1 if axis == "NS" else 0  # index of the along coordinate
-        self.ma = sum((s.p[i] + s.q[i]) / 2 * s.length for s in segs) / w
-        self.mc = sum((s.p[1 - i] + s.q[1 - i]) / 2 * s.length for s in segs) / w
-        self.slope = (sum(s.q[1 - i] - s.p[1 - i] for s in segs)
-                      / sum(s.q[i] - s.p[i] for s in segs))
-        lo = min(min(s.p[i], s.q[i]) for s in segs)
-        hi = max(max(s.p[i], s.q[i]) for s in segs)
-        self.set_ends(lo, hi)
-
-    def set_ends(self, lo, hi):
-        """Sets the output points ([lat, lon]) at along coordinates lo, hi."""
-        ends = [(a, self.mc + self.slope * (a - self.ma)) for a in (lo, hi)]
-        self.points = [[a, c] if self.i == 1 else [c, a] for a, c in ends]
+        self.cross = sum(s.cross * s.length for s in segs) / w  # metres
+        # The cross coordinate in degrees: longitude for N-S, latitude for E-W.
+        i = 0 if axis == "NS" else 1
+        self.mc = sum((s.p[i] + s.q[i]) / 2 * s.length for s in segs) / w
 
 
 def build_runs(axis, name, num, segs):
@@ -209,144 +212,231 @@ def all_runs(groups):
             for r in build_runs(axis, name, num, segs)]
 
 
-def ns_spacing(by_num):
-    """Theil-Sen median of metres per street number, from long runs."""
-    best = {n: max(rs, key=lambda r: r.length) for n, rs in by_num.items()}
-    best = {n: r for n, r in best.items() if r.length >= LONG_RUN_M}
-    nums = sorted(best)
-    slopes = [(best[m].cross - best[n].cross) / (n - m)
-              for i, m in enumerate(nums) for n in nums[i + 1:] if n - m >= 12]
-    return statistics.median(slopes)
+def ordinal(n):
+    if n % 100 in (11, 12, 13):
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
 
 
-def step_ns(by_num, spacing):
-    """Walks from the anchor to each next numbered street, east and west."""
-    anchor = max(by_num[ANCHOR_NS], key=lambda r: r.length)
-    found = {ANCHOR_NS: anchor}
-    for direction, stop in ((-1, min(by_num) - 1), (1, max(by_num) + 1)):
-        last = anchor
-        for n in range(ANCHOR_NS + direction, stop, direction):
-            steps = abs(n - last.num)
-            predicted = last.cross - (n - last.num) * spacing  # east is +x
-            tol = 0.6 * spacing * steps
-            cands = [r for r in by_num.get(n, [])
-                     if abs(r.cross - predicted) <= tol]
-            if not cands:
-                if n in by_num:
-                    log(f"  {n}: runs exist, but none near the grid position")
-                continue
-            last = found[n] = max(cands, key=lambda r: r.length)
-    missing = [n for n in range(min(found), max(found)) if n not in found]
-    log(f"N-S: {len(found)} streets, {min(found)}..{max(found)}; "
-        f"no long run for: {missing}")
-    return found
+def fit_line(obs):
+    """Weighted least squares of c = a + b * k over (k, c, weight)."""
+    w = sum(l for _, _, l in obs)
+    mk = sum(k * l for k, _, l in obs) / w
+    mc = sum(c * l for _, c, l in obs) / w
+    b = (sum(l * (k - mk) * (c - mc) for k, c, l in obs)
+         / sum(l * (k - mk) ** 2 for k, _, l in obs))
+    return mc - b * mk, b
 
 
-def check_block_width(found, spacing):
-    log("N-S block-width check:")
-    for m in sorted(n for n in found if n % 12 == 0):
-        if m + 12 in found:
-            w = found[m].cross - found[m + 12].cross
-            log(f"  {m:>3}-{m + 12:<3} mile section: {w:7.1f} m, "
-                f"{w / 12:6.1f} m/number")
-    for label, side in (("east of", lambda n: n < ANCHOR_NS),
-                        ("west of", lambda n: n >= ANCHOR_NS)):
-        nums = sorted(n for n in found if side(n))
-        steps = [(found[a].cross - found[b].cross) / (b - a)
-                 for a, b in zip(nums, nums[1:])]
-        if steps:
-            log(f"  median spacing {label} {found[ANCHOR_NS].name}: "
-                f"{statistics.median(steps):.1f} m/number ({len(steps)} pairs)")
-    miles = sorted(n for n in found if n % 12 == 0)
-    mean_n = statistics.fmean(miles)
-    mean_x = statistics.fmean(found[n].cross for n in miles)
-    b = (sum((n - mean_n) * (found[n].cross - mean_x) for n in miles)
-         / sum((n - mean_n) ** 2 for n in miles))
-    log(f"  mile-line fit: {-b:.1f} m/number")
-    off = [(n, found[n].cross - (mean_x + b * (n - mean_n))) for n in sorted(found)]
-    off = [(n, d) for n, d in off if abs(d) > 0.5 * spacing]
-    log(f"  {len(off)} streets more than {0.5 * spacing:.0f} m from the "
-        "regular grid: " + ", ".join(f"{n} ({d:+.0f} m)" for n, d in off))
+class Grid:
+    """Parallel lines at c = offset + k * step, for integer k.
 
-
-def longest_per_name(runs):
-    best = {}
-    for r in runs:
-        if r.name not in best or r.length > best[r.name].length:
-            best[r.name] = r
-    return list(best.values())
-
-
-def ew_spacing(runs):
-    """Median gap between adjacent long E-W streets."""
-    ys = sorted(r.cross for r in runs if r.length >= 2 * MIN_RUN_M)
-    return statistics.median(b - a for a, b in zip(ys, ys[1:]) if b - a > 30)
-
-
-def select_ew(runs, spacing):
-    """Keeps one run per street name, longest streets first.
-
-    East Omaha is a patchwork of plats with their own offsets, so there is no
-    single E-W origin to step from. A run is dropped only if a longer street
-    covers the same longitudes less than 0.4 * spacing north or south of it.
+    c is longitude for N-S lines (k is the street number) and latitude for
+    E-W lines, so the lines are meridians and parallels.
     """
-    found = []
-    for r in sorted(runs, key=lambda r: -r.length):
-        clash = next((f for f in found
-                      if abs(f.cross - r.cross) < 0.4 * spacing
-                      and min(f.a2, r.a2) > max(f.a1, r.a1)), None)
-        if clash:
-            log(f"  E-W: dropped {r.name} ({r.length:.0f} m), "
-                f"{r.cross - clash.cross:+.0f} m from {clash.name}")
-        else:
-            found.append(r)
-    found.sort(key=lambda r: r.cross)
-    for a, b in zip(found, found[1:]):
-        if b.cross - a.cross > 1.5 * spacing:
-            log(f"  E-W gap: {b.cross - a.cross:.0f} m between "
-                f"{a.name} and {b.name}")
-    log(f"E-W: {len(found)} streets")
-    return found
+
+    def __init__(self, offset, step):
+        self.offset, self.step = offset, step
+
+    def at(self, k):
+        return self.offset + k * self.step
+
+    def slot(self, c):
+        """The fractional grid index of coordinate c."""
+        return (c - self.offset) / self.step
+
+    def on_grid(self, c, k):
+        return abs(self.slot(c) - k) <= ON_GRID_TOL
+
+    def refine(self, runs, index):
+        """Refits the grid to the runs within ON_GRID_TOL of their slot."""
+        for _ in range(20):
+            obs = [(index(r), r.mc, r.length) for r in runs
+                   if self.on_grid(r.mc, index(r))]
+            offset, step = fit_line(obs)
+            if (offset, step) == (self.offset, self.step):
+                break
+            self.offset, self.step = offset, step
+        return self
+
+
+class NSStreet:
+    def __init__(self, num, lon, how):
+        self.num, self.lon, self.how = num, lon, how
+
+
+def build_ns(runs):
+    """Places each numbered street. Returns {number: NSStreet}.
+
+    The mile and half-mile roads (every ANCHOR_EVERY numbers) with a long run
+    are anchors. Between two anchors the streets are a regular grid, because
+    the block width changes a little from one section to the next, and there
+    are jogs at survey correction lines. If a long street (ANCHOR_MIN_M) is
+    off that grid, the section is not regular and uses measured positions.
+    Short streets off the grid are usually subdivision streets and are moved
+    onto the grid.
+    """
+    by_num = {}
+    for r in runs:
+        by_num.setdefault(r.num, []).append(r)
+    longest = {n: max(rs, key=lambda r: r.length) for n, rs in by_num.items()}
+    anchors = sorted(n for n, r in longest.items()
+                     if n % ANCHOR_EVERY == 0 and r.length >= ANCHOR_MIN_M)
+    lon = {n: longest[n].mc for n in anchors}
+    out = {n: NSStreet(n, lon[n], "anchor") for n in anchors}
+
+    def on_grid(n, x, step):
+        return any(abs(r.mc - x) <= ON_GRID_TOL * abs(step)
+                   for r in by_num.get(n, []))
+
+    def place(nums, grid_lon, step, label):
+        nums = list(nums)
+        moved = [n for n in nums
+                 if n in by_num and not on_grid(n, grid_lon(n), step)]
+        regular = all(longest[n].length < ANCHOR_MIN_M for n in moved)
+        log(f"  {label}: {-step * KX:5.1f} m/number, "
+            + ("regular" if regular else "IRREGULAR, measured positions")
+            + (f"; off the grid: {moved}" if moved else ""))
+        for n in nums:
+            if regular:
+                how = "grid" if on_grid(n, grid_lon(n), step) else "imputed"
+                out[n] = NSStreet(n, grid_lon(n), how)
+            elif n in by_num:
+                out[n] = NSStreet(n, longest[n].mc, "measured")
+
+    for a, b in zip(anchors, anchors[1:]):
+        step = (lon[b] - lon[a]) / (b - a)
+        place(range(a + 1, b), lambda n: lon[a] + (n - a) * step, step,
+              f"{a:>3}-{b:<3}")
+
+    # Past the first and last anchors, continue the step of the next section
+    # for as far as there are streets on it.
+    for end, other, direction in ((anchors[0], anchors[1], -1),
+                                  (anchors[-1], anchors[-2], 1)):
+        step = (lon[end] - lon[other]) / (end - other)
+        grid_lon = lambda n: lon[end] + (n - end) * step
+        found = [n for n in by_num if (n - end) * direction > 0
+                 and on_grid(n, grid_lon(n), step)]
+        if found:
+            last = max(found, key=lambda n: n * direction)
+            nums = range(end + direction, last + direction, direction)
+            place(nums, grid_lon, step, f"{end:>3}-{last:<3}")
+    return out
+
+
+def fit_ew(runs):
+    """The E-W grid. The streets have no numbers, so the spacing comes from a
+    periodogram of the run positions, weighted by length."""
+    best = (0, None, None)
+    for i in range(int((EW_MAX_M - EW_MIN_M) / 0.01) + 1):
+        sy = EW_MIN_M + i * 0.01
+        z = sum(r.length * cmath.exp(2j * math.pi * r.cross / sy) for r in runs)
+        if abs(z) > best[0]:
+            best = (abs(z), sy, z)
+    _, sy, z = best
+    y0 = cmath.phase(z) / (2 * math.pi) * sy  # metres north of LAT0
+    grid = Grid(LAT0 + y0 / KY, sy / KY)
+    return grid.refine(runs, lambda r: round(grid.slot(r.mc)))
+
+
+def name_ew(grid, runs):
+    """Gives each E-W grid slot one street name, and each name one slot.
+
+    Pass 1 uses the runs on the grid, and the name with the most length on a
+    slot gets it: a vanity rename of part of a street (Mike Fahey Street on
+    Webster Street) loses to the name of the full street. Pass 2 fills the
+    empty slots from long streets of an older plat that is off the grid.
+    """
+    on, off = {}, {}  # (name, slot) -> total run length
+    for r in runs:
+        k = round(grid.slot(r.mc))
+        d = on if grid.on_grid(r.mc, k) else off
+        d[r.name, k] = d.get((r.name, k), 0) + r.length
+    slots, used, lost, length_of = {}, set(), [], {}
+    for cands, min_len, label in ((on, MIN_RUN_M, None), (off, OFF_GRID_MIN_M, "off-grid")):
+        for (name, k), length in sorted(cands.items(), key=lambda kv: -kv[1]):
+            if name in used or length < min_len:
+                continue
+            if k in slots:
+                lost.append((name, k, length))
+                continue
+            slots[k] = name
+            length_of[k] = length
+            used.add(name)
+            if label:
+                frac = grid.slot(max((r for r in runs if r.name == name),
+                                     key=lambda r: r.length).mc) - k
+                log(f"  E-W: {name} is {label} ({frac:+.2f} step, {length:.0f} m), "
+                    "put in the empty slot")
+    for name, k, length in lost:
+        if name not in used:
+            log(f"  E-W: {name} ({length:.0f} m) not used, "
+                f"its slot has {slots[k]}")
+    # Outside the main block of streets, a small group of nearby streets
+    # (for example, a subdivision in the north) must be long to be a grid road.
+    ks = sorted(slots)
+    groups, cur = [], [ks[0]]
+    for k in ks[1:]:
+        if k - cur[-1] > ISOLATED_GAP:
+            groups.append(cur)
+            cur = []
+        cur.append(k)
+    groups.append(cur)
+    for grp in groups:
+        if len(grp) < ISOLATED_GROUP:
+            for k in grp:
+                if length_of[k] < ISOLATED_MIN_M:
+                    log(f"  E-W: {slots[k]} ({length_of[k]:.0f} m) removed, "
+                        "a short street away from the grid")
+                    del slots[k]
+    ks = sorted(slots)
+    empty = [k for k in range(ks[0], ks[-1]) if k not in slots]
+    log(f"E-W: {len(slots)} named slots, {len(empty)} empty slots")
+    return slots
 
 
 def main():
     ways = fetch_ways()
     log(f"{len(ways)} named ways in Douglas County")
 
-    ns_groups = group_segments([w for w in ways if NUMBERED.match(w["name"])],
-                               keep=lambda axis, seg: axis == "NS")
-    by_num = {}
-    for r in all_runs(ns_groups):
-        by_num.setdefault(r.num, []).append(r)
-    spacing = ns_spacing(by_num)
-    log(f"N-S standard spacing: {spacing:.1f} m/number")
-    found_ns = step_ns(by_num, spacing)
-    check_block_width(found_ns, spacing)
+    numbered = [w for w in ways if NUMBERED.match(w["name"])]
+    ns_runs = all_runs(group_segments(
+        numbered, keep=lambda axis, seg: axis == "NS"
+        and NS_LAT_MIN <= (seg.p[1] + seg.q[1]) / 2 <= NS_LAT_MAX))
+    # Far west, some streets exist only north of NS_LAT_MAX.
+    in_band = {r.num for r in ns_runs}
+    ns_runs += [r for r in all_runs(group_segments(
+                    numbered, keep=lambda axis, seg: axis == "NS"))
+                if r.num not in in_band]
+    log("N-S sections:")
+    ns = build_ns(ns_runs)
+    n_min, n_max = min(ns), max(ns)
+    for how in ("anchor", "grid", "imputed", "measured"):
+        nums = sorted(n for n, st in ns.items() if st.how == how)
+        log(f"  {how}: {len(nums)}" + (f" {nums}" if how != "grid" else ""))
+    missing = [n for n in range(n_min, n_max) if n not in ns]
+    log(f"N-S: {n_min}..{n_max}, not placed: {missing}")
 
-    # E-W streets only east of the 72nd Street line.
-    line_w = found_ns[ANCHOR_NS].points  # [[lat, lon], [lat, lon]]
-    (la1, lo1), (la2, lo2) = line_w
+    # E-W streets only east of the 72nd Street grid line.
+    lon_limit = ns[WEST_LIMIT].lon
+    ew_runs = all_runs(group_segments(
+        ways, keep=lambda axis, seg: axis == "EW" and seg.q[0] >= lon_limit))
+    ew = fit_ew(ew_runs)
+    log(f"E-W grid: {ew.step * KY:.2f} m per street, "
+        f"{1609.344 / (ew.step * KY):.3f} streets per mile")
+    slots = name_ew(ew, ew_runs)
 
-    def east_of_limit(axis, seg):  # any part of it; run ends are cut below
-        lon, lat = seg.q  # the east end of an E-W segment
-        return axis == "EW" and lon >= lo1 + (lo2 - lo1) * (lat - la1) / (la2 - la1)
+    lat_s, lat_n = ew.at(min(slots)), ew.at(max(slots))
+    lon_w, lon_e = lon_limit, ns[n_min].lon
 
-    ew_runs = longest_per_name(all_runs(group_segments(ways, keep=east_of_limit)))
-    ew_sp = ew_spacing(ew_runs)
-    log(f"E-W standard spacing: {ew_sp:.1f} m")
-    found_ew = select_ew(ew_runs, ew_sp)
-    for r in found_ew:  # a segment can cross the limit line; cut it there
-        (lat_w, lon_w), (lat_e, lon_e) = r.points
-        limit = lo1 + (lo2 - lo1) * (lat_w - la1) / (la2 - la1)
-        if lon_w < limit:
-            r.set_ends(limit, lon_e)
+    def line(name, a, b):
+        return {"name": name,
+                "points": [[round(c, 6) for c in a], [round(c, 6) for c in b]]}
 
-    def fmt(r):
-        return {"name": r.name,
-                "points": [[round(lat, 6), round(lon, 6)] for lat, lon in r.points]}
-
-    out = [fmt(found_ns[n]) for n in sorted(found_ns)]
-    out += [fmt(r) for r in sorted(found_ew, key=lambda r: -r.cross)]
+    out = [line(f"{ordinal(n)} Street", (lat_s, ns[n].lon), (lat_n, ns[n].lon))
+           for n in sorted(ns)]
+    out += [line(slots[k], (ew.at(k), lon_w), (ew.at(k), lon_e))
+            for k in sorted(slots, reverse=True)]
     json.dump(out, sys.stdout, indent=1)
     print()
 
