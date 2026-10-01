@@ -1,7 +1,7 @@
 #!/opt/local/bin/python3.14
 """Write a static HTML map that extends the Omaha street grid over the globe.
 
-Usage: make_extendoma.py [omaha_grid.json [extendoma.html]]
+Usage: make_extendoma.py [omaha_grid.json [extendoma.html [README.md]]]
 
 This is the Omaha version of extendny.js. The page draws the grid over
 OpenStreetMap tiles with Leaflet. Serve it over http (for example
@@ -25,6 +25,7 @@ All N-S streets are meridians and all E-W streets are parallels, so on the
 Web Mercator map they are straight vertical and horizontal lines.
 """
 
+import html
 import json
 import re
 import sys
@@ -34,6 +35,9 @@ import sys
 EW_MILE_ANCHOR = "Harrison Street"
 
 NS_NUMBERED = re.compile(r"^(\d+)(st|nd|rd|th) Street$")
+HEADING = re.compile(r"^#+\s*(.+?)$")
+CODE = re.compile(r"`([^`]+)`")
+LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 
 TEMPLATE = """<!doctype html>
 <html>
@@ -49,6 +53,13 @@ TEMPLATE = """<!doctype html>
   .panel form { display: flex; gap: 4px; margin: 0; }
   .panel input[type=search] { width: 14em; }
   .panel .msg { color: #a00; font-size: 12px; }
+  .panel .info { max-width: 32em; max-height: 60vh; overflow-y: auto; margin-top: 4px; }
+  .panel .info h3 { font-size: 13px; margin: 8px 0 2px; }
+  .panel .info p { margin: 0 0 6px; }
+  /* Undo the Leaflet .leaflet-bar a style, which is for the zoom buttons. */
+  .leaflet-bar .info a, .leaflet-bar .info a:hover {
+    display: inline; width: auto; height: auto; line-height: inherit; text-align: left;
+    border: 0; border-radius: 0; background: none; color: #0078a8; text-decoration: underline; }
   .signs { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
   .sign { background: #2c7669; color: #fff; border: 2px solid #fff; border-radius: 4px;
           padding: 1px 6px; font: bold 13px/1.4 sans-serif; white-space: nowrap;
@@ -229,10 +240,24 @@ function drawHover() {
   L.polyline([[lat, v.w], [lat, v.e]], style).addTo(hoverLayer);
 }
 
+// A tap on a touch screen also sends a mousemove, but no mouseout after it.
+// Thus show the hover sign only for a mouse. Pointer events come before the
+// mouse events that they cause.
+let pointerType = 'mouse';
+const onPointer = e => {
+  pointerType = e.pointerType;
+  if (pointerType !== 'mouse') hideHover();
+};
+map.getContainer().addEventListener('pointerdown', onPointer, true);
+map.getContainer().addEventListener('pointermove', onPointer, true);
+
 map.on('mousemove', e => {
-  if (hoverFrame) return;
+  // Leaflet also sends mousemove for the controls (zoom, panel, info box).
+  if (e.originalEvent.target.closest('.leaflet-control')) return hideHover();
+  if (hoverFrame || pointerType !== 'mouse') return;
   hoverFrame = requestAnimationFrame(() => {
     hoverFrame = null;
+    if (pointerType !== 'mouse') return;
     const h = nearestIntersection(e.latlng);
     if (!hover || h.i !== hover.i || h.j !== hover.j || h.off !== hover.off) {
       hover = h;
@@ -244,11 +269,14 @@ map.on('mousemove', e => {
     mouseDiv.hidden = false;
   });
 });
-map.on('mouseout dragstart', () => {
+function hideHover() {
+  cancelAnimationFrame(hoverFrame);
+  hoverFrame = null;
   mouseDiv.hidden = true;
   hover = null;
   hoverLayer.clearLayers();
-});
+}
+map.on('mouseout dragstart', hideHover);
 
 // Pinned intersection, also kept in the URL hash:
 // #<N-S name>/<E-W name>/<zoom>, with "_" for spaces.
@@ -315,7 +343,8 @@ const Panel = L.Control.extend({
       '<form><input type="search" placeholder="Search for a place" aria-label="Search for a place">' +
       '<button type="submit">Go</button>' +
       ('geolocation' in navigator ? '<button type="button" class="locate">My location</button>' : '') +
-      '</form><div class="msg" hidden></div>';
+      '<button type="button" class="about" title="About this map" aria-expanded="false">&#9432; Info</button>' +
+      '</form><div class="msg" hidden></div><div class="info" hidden>__README__</div>';
     const msg = div.querySelector('.msg');
     const say = text => { msg.textContent = text; msg.hidden = !text; };
     const goTo = (latlng, zoom) => { map.setView(latlng, zoom); setPin(nearestIntersection(latlng)); };
@@ -342,6 +371,11 @@ const Panel = L.Control.extend({
         p => goTo(L.latLng(p.coords.latitude, p.coords.longitude), 16),
         () => say('Location is not available.'));
     });
+    const info = div.querySelector('.info'), about = div.querySelector('.about');
+    about.addEventListener('click', () => {
+      info.hidden = !info.hidden;
+      about.setAttribute('aria-expanded', String(!info.hidden));
+    });
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
     return div;
@@ -349,7 +383,12 @@ const Panel = L.Control.extend({
 });
 new Panel().addTo(map);
 
-if (!hashChange()) map.fitBounds([[D.ew.at(-1)[1], D.ns.at(-1)[1]], [D.ew[0][1], D.ns[0][1]]]);
+// Default view: centered on 72nd and Dodge, at the zoom that shows all of Omaha.
+if (!hashChange()) {
+  const omaha = L.latLngBounds([[D.ew.at(-1)[1], D.ns.at(-1)[1]], [D.ew[0][1], D.ns[0][1]]]);
+  map.setView(intersectionLatLng({i: NS.indexOfKey(72), j: ewIndexByName.get('Dodge Street'), off: 0}),
+              map.getBoundsZoom(omaha));
+}
 drawGrid();
 </script>
 </body>
@@ -392,14 +431,55 @@ def extract(grid):
             "north": cont["north"]["spacing_deg"], "south": cont["south"]["spacing_deg"]}
 
 
+def link(m):
+    """HTML for a Markdown link. m is a LINK match on escaped text."""
+    new_tab = ' target="_blank" rel="noopener"' if re.match(r"https?:", m[2]) else ""
+    return f'<a href="{m[2]}"{new_tab}>{m[1]}</a>'
+
+
+def readme_html(text):
+    """HTML for the info box, from README.md.
+
+    A "# Title" line is a heading. Other lines make paragraphs, which blank
+    lines separate. `text` is code and [text](url) is a link. A link to an
+    http(s) URL opens in a new tab, so the map stays open. Other Markdown
+    stays as plain text.
+    """
+    out, para = [], []
+
+    def flush():
+        if para:
+            text = CODE.sub(r"<code>\1</code>", html.escape(" ".join(para)))
+            text = LINK.sub(link, text)
+            out.append(f"<p>{text}</p>")
+            para.clear()
+
+    for line in text.splitlines():
+        line = line.strip()
+        if m := HEADING.match(line):
+            flush()
+            out.append(f"<h3>{html.escape(m[1])}</h3>")
+        elif line:
+            para.append(line)
+        else:
+            flush()
+    flush()
+    return "".join(out)
+
+
 def main():
     src = sys.argv[1] if len(sys.argv) > 1 else "omaha_grid.json"
     dst = sys.argv[2] if len(sys.argv) > 2 else "extendoma.html"
+    readme = sys.argv[3] if len(sys.argv) > 3 else "README.md"
     with open(src) as f:
         data = extract(json.load(f))
+    with open(readme) as f:
+        info = readme_html(f.read())
     text = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
+    # info goes in a JS string literal in single quotes.
+    info = json.dumps(info)[1:-1].replace("'", "\\'").replace("</", "<\\/")
     with open(dst, "w") as f:
-        f.write(TEMPLATE.replace("__DATA__", text))
+        f.write(TEMPLATE.replace("__DATA__", text).replace("__README__", info))
     print(f"{dst}: {len(data['ns'])} N-S and {len(data['ew'])} E-W streets", file=sys.stderr)
 
 
