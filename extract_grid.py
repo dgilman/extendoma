@@ -70,6 +70,15 @@ ISOLATED_GROUP = 3  # a group with fewer E-W streets than this is small
 ISOLATED_MIN_M = 1000  # a street in a small group must be this long
 WEST_LIMIT = 72  # E-W streets only east of this numbered street
 EAST_FIRST = 1  # the N-S grid continues east to this numbered street
+# Downtown N-S streets (up to DOWNTOWN_WEST) are measured only between
+# Leavenworth and Dodge Streets. Outside this band the old plats have other
+# alignments: the long run of 18th Street north of Cuming Street is 116 ft east
+# of 18th Street downtown, and the subdivision at 13th and Pacific Streets is
+# cut off by the railway. The streets also lean about 60 ft from Cuming to
+# Vinton Street, so the band sets where the grid is correct.
+DOWNTOWN_LAT = (41.2524, 41.2597)  # Leavenworth Street to Dodge Street
+DOWNTOWN_BREAK = 18  # EAST_FIRST to this street: one grid fitted to the band
+DOWNTOWN_WEST = 24  # DOWNTOWN_BREAK to this street: a grid between the two
 # Manual N-S fix: "<n>th Avenue" halfway between the nth and (n+1)th Streets.
 NS_AVENUES = (48, 49, 50, 51, 60, 65)
 # Manual N-S fix: put a street on the line between two other streets. In Benson,
@@ -77,7 +86,8 @@ NS_AVENUES = (48, 49, 50, 51, 60, 65)
 NS_REGRID = {55: (52, 60), 57: (52, 60)}
 # Nominal grids, in US survey feet (see SESSION_NOTES.md). Between two N-S
 # anchors, the lines are evenly spaced over the nominal width of the section.
-NOMINAL_FT_PER_NUMBER = ((12, 360), (24, 344), (None, 440))  # (below, ft)
+# 364 ft is a 264 ft block and a 100 ft street. 330 ft is 5 chains.
+NOMINAL_FT_PER_NUMBER = ((18, 364), (24, 330), (None, 440))  # (below, ft)
 NOMINAL_EW_FT = 330  # 5 chains, 1/16 mile
 # PLSS range lines (6-mile columns of townships). Scaled to the 40N baseline,
 # they are 72, 66, 60 and 54 miles east of the 6th Principal Meridian. Each
@@ -346,7 +356,14 @@ class NSStreet:
         self.name = name or f"{ordinal(num)} Street"
 
 
-def build_ns(runs):
+def by_number(runs):
+    by_num = {}
+    for r in runs:
+        by_num.setdefault(r.num, []).append(r)
+    return by_num
+
+
+def build_ns(runs, downtown_runs):
     """Places each numbered street. Returns {number: NSStreet}.
 
     The mile and half-mile roads (every ANCHOR_EVERY numbers) with a long run
@@ -356,64 +373,73 @@ def build_ns(runs):
     off that grid, the section is not regular and uses measured positions.
     Short streets off the grid are usually subdivision streets and are moved
     onto the grid.
+
+    Downtown, only downtown_runs (in DOWNTOWN_LAT) are used. From EAST_FIRST
+    to DOWNTOWN_BREAK, the streets are one regular grid, fitted to the runs.
+    From DOWNTOWN_BREAK to DOWNTOWN_WEST, the streets are a regular grid
+    between the two.
     """
-    by_num = {}
-    for r in runs:
-        by_num.setdefault(r.num, []).append(r)
+    by_num = by_number(runs)
     longest = {n: max(rs, key=lambda r: r.length) for n, rs in by_num.items()}
     anchors = sorted(n for n, r in longest.items()
-                     if n % ANCHOR_EVERY == 0 and r.length >= ANCHOR_MIN_M)
+                     if n >= DOWNTOWN_WEST and n % ANCHOR_EVERY == 0
+                     and r.length >= ANCHOR_MIN_M)
     lon = {n: longest[n].mc for n in anchors}
+
+    dt_by_num = by_number(downtown_runs)
+    dt_longest = {n: max(rs, key=lambda r: r.length)
+                  for n, rs in dt_by_num.items()}
+    lon[DOWNTOWN_WEST] = dt_longest[DOWNTOWN_WEST].mc
+    fit = [r for n, r in dt_longest.items() if n <= DOWNTOWN_BREAK]
+    dt_grid = Grid(*fit_line([(r.num, r.mc, r.length) for r in fit]))
+    dt_grid.refine(fit, lambda r: r.num)
+    lon[DOWNTOWN_BREAK] = dt_grid.at(DOWNTOWN_BREAK)
+    anchors = sorted({DOWNTOWN_BREAK, *anchors})
     out = {n: NSStreet(n, lon[n], "anchor") for n in anchors}
 
-    def on_grid(n, x, step):
+    def on_grid(n, x, step, by_num):
         return any(abs(r.mc - x) <= ON_GRID_TOL * abs(step)
                    for r in by_num.get(n, []))
 
-    def place(nums, grid_lon, step, label):
+    def place(nums, grid_lon, step, label, by_num=by_num):
         nums = list(nums)
-        moved = [n for n in nums
-                 if n in by_num and not on_grid(n, grid_lon(n), step)]
+        longest = {n: max(rs, key=lambda r: r.length)
+                   for n, rs in by_num.items()}
+        on_grid_n = lambda n: on_grid(n, grid_lon(n), step, by_num)
+        moved = [n for n in nums if n in by_num and not on_grid_n(n)]
         regular = all(longest[n].length < ANCHOR_MIN_M for n in moved)
         log(f"  {label}: {-step * KX / FT:5.1f} ft/number, "
             + ("regular" if regular else "IRREGULAR, measured positions")
             + (f"; off the grid: {moved}" if moved else ""))
         for n in nums:
             if regular:
-                how = "grid" if on_grid(n, grid_lon(n), step) else "imputed"
+                how = "grid" if on_grid_n(n) else "imputed"
                 out[n] = NSStreet(n, grid_lon(n), how)
             elif n in by_num:
                 out[n] = NSStreet(n, longest[n].mc, "measured")
 
+    # Downtown. Most streets east of 10th Street are not in the band, and the
+    # grid continues to EAST_FIRST over them.
+    place(range(EAST_FIRST, DOWNTOWN_BREAK), dt_grid.at, dt_grid.step,
+          f"{EAST_FIRST:>3}-{DOWNTOWN_BREAK:<3}", dt_by_num)
+    fitted = sorted(r.num for r in fit if dt_grid.on_grid(r.mc, r.num))
+    log(f"          fitted to {fitted}")
     for a, b in zip(anchors, anchors[1:]):
         step = (lon[b] - lon[a]) / (b - a)
         place(range(a + 1, b), lambda n: lon[a] + (n - a) * step, step,
-              f"{a:>3}-{b:<3}")
+              f"{a:>3}-{b:<3}",
+              dt_by_num if b <= DOWNTOWN_WEST else by_num)
 
-    # Past the first and last anchors, continue the step of the next section
-    # for as far as there are streets on it.
-    for end, other, direction in ((anchors[0], anchors[1], -1),
-                                  (anchors[-1], anchors[-2], 1)):
-        step = (lon[end] - lon[other]) / (end - other)
-        grid_lon = lambda n: lon[end] + (n - end) * step
-        found = [n for n in by_num if (n - end) * direction > 0
-                 and on_grid(n, grid_lon(n), step)]
-        if found:
-            last = max(found, key=lambda n: n * direction)
-            nums = range(end + direction, last + direction, direction)
-            place(nums, grid_lon, step, f"{end:>3}-{last:<3}")
-
-    # East of the last street on the grid, continue the downtown step to
-    # EAST_FIRST. 2nd and 3rd Streets are off the grid, and 1st Street is not
-    # in the data.
-    end, other = anchors[0], anchors[1]
+    # Past the last anchor, continue the step of the last section for as far
+    # as there are streets on it.
+    end, other = anchors[-1], anchors[-2]
     step = (lon[end] - lon[other]) / (end - other)
-    added = range(min(out) - 1, EAST_FIRST - 1, -1)
-    for n in added:
-        out[n] = NSStreet(n, lon[end] + (n - end) * step, "imputed")
-    if added:
-        log(f"  {added[0]:>3}-{EAST_FIRST:<3}: {-step * KX / FT:5.1f} ft/number, "
-            "added east of the grid")
+    grid_lon = lambda n: lon[end] + (n - end) * step
+    found = [n for n in by_num
+             if n > end and on_grid(n, grid_lon(n), step, by_num)]
+    if found:
+        place(range(end + 1, max(found) + 1), grid_lon, step,
+              f"{end:>3}-{max(found):<3}")
     return out
 
 
@@ -673,8 +699,13 @@ def main():
     ns_runs += [r for r in all_runs(group_segments(
                     numbered, keep=lambda axis, seg: axis == "NS"))
                 if r.num not in in_band]
+    downtown_runs = all_runs(group_segments(
+        [w for w in numbered
+         if int(NUMBERED.match(w["name"]).group(2)) <= DOWNTOWN_WEST],
+        keep=lambda axis, seg: axis == "NS"
+        and DOWNTOWN_LAT[0] <= (seg.p[1] + seg.q[1]) / 2 <= DOWNTOWN_LAT[1]))
     log("N-S sections:")
-    ns = build_ns(ns_runs)
+    ns = build_ns(ns_runs, downtown_runs)
     n_min, n_max = min(ns), max(ns)
     for n, (a, b) in NS_REGRID.items():
         ns[n] = NSStreet(n, ns[a].lon + (n - a) * (ns[b].lon - ns[a].lon) / (b - a),

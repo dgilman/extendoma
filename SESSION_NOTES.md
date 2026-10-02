@@ -69,6 +69,7 @@ The program clips all ways to the Douglas County polygon. This removes the numbe
    - If a long street (1.5 km or more) is off the grid of its section, the section is irregular. Then its streets use their measured positions. Short streets off the grid are usually subdivision streets, so the program moves them onto the grid.
    - The program fills in numbers that have no street on the grid.
    - It measures the streets only south of 41.30°N if they exist there, because north of that line the roads west of 132nd move west by 15–50 m.
+   - Downtown (1st to 24th Street): the program measures the streets only between Leavenworth and Dodge Streets (`DOWNTOWN_LAT`). 1st to 18th Street (`DOWNTOWN_BREAK`) is one regular grid, fitted by least squares to the streets in that band (10th–18th). 18th to 24th Street (`DOWNTOWN_WEST`) is a regular grid between the fitted 18th Street and the measured 24th Street. 24th Street is also the east anchor of 24th–30th Street.
 6. **E-W grid (named streets, east of 72nd Street only).**
    - The E-W streets have no numbers. The program finds the spacing with a periodogram of the run positions, weighted by length.
    - It then refits the grid by least squares on the runs within 25% of a step from a grid line.
@@ -80,12 +81,12 @@ The program clips all ways to the Douglas County polygon. This removes the numbe
    - `EW_RENAMES`: rename Mary Street to Titus Avenue.
    - `EW_FILL`: add Ohern Street between O and P Streets, and Gold Street between Arbor and Bancroft Streets. The program stops with an error if there is not exactly one empty slot between the two streets.
 8. **Manual N-S fixes** (constants near the top of the file):
-   - `EAST_FIRST`: the downtown grid continues east of 4th Street to 1st Street, with the step of 6th–12th Street.
+   - `EAST_FIRST`: the downtown grid (1st–18th Street) continues east to 1st Street. East of 10th Street, almost no street is in the downtown band, so these lines are imputed.
    - `NS_REGRID`: 55th and 57th Streets go on the straight line from 52nd to 60th Street.
    - `NS_AVENUES`: 48th, 49th, 50th, 51st, 60th and 65th Avenues, each halfway between the nth and the (n+1)th Street.
 9. **Presidents** (added by David): south of Harrison Street, the E-W grid continues with artificial streets that have the names of the presidents after William Henry Harrison.
 10. **Nominal grid.** The same streets on a grid with the nominal spacings in US survey feet:
-    - N-S: the nominal width of a section between two anchors is its number of streets times 360 ft (east of 12th Street), 344 ft (12th–24th Street) or 440 ft (west of 24th Street). The lines in the section, avenues included, are evenly spaced over that width. In Benson this gives 330 ft, because 48th–60th Street has 16 lines in one mile.
+    - N-S: the nominal width of a section between two anchors is its number of streets times 364 ft (east of 18th Street), 330 ft (18th–24th Street) or 440 ft (west of 24th Street). The lines in the section, avenues included, are evenly spaced over that width. In Benson this gives 330 ft, because 48th–60th Street has 16 lines in one mile.
     - The PLSS range lines (`RANGE_LINES`: 60th, 132nd, 204th and 276th Street) are at their regular positions. From each range line, the nominal widths go west. The west column of each range (the last mile before the next range line) takes the error: its lines are evenly spaced between the nominal position of its east line and the next range line. East of 60th Street and west of 276th Street, the nominal widths go out from that range line.
     - E-W: 330 ft, with Dodge Street at its regular position.
 11. **Output.** All N-S lines are meridians and all E-W lines are parallels, so all lines are parallel and on the grid.
@@ -110,13 +111,14 @@ The program converts degrees to metres with the WGS84 ellipsoid at 41.26°N: 83,
 | 12 | New output format (`ns`, `ew`, `continuation`), diagnostics in feet, and a nominal grid. The viewer can change between the regular and the nominal grid. | David. The survey units are the best description of the pattern. |
 | 13 | Pin the nominal N-S grid at each PLSS range line, not only at 72nd Street. The west column of each range takes the error. | The nominal grid moved up to 443 ft from the regular grid in the west. The main roads showed that the alignment starts again at each range line. |
 | 14 | Add `kind` (`meridian` or `parallel`) and `lon` or `lat` to each street. The viewer draws the E-W lines as parallels. | The review of `extendny.js`: its streets are small circles (parallels of a rotated globe). The viewer drew the E-W lines as great circles, which were 1.5 km from their parallel at 150 km. |
+| 15 | Measure downtown (1st–24th Street) only between Leavenworth and Dodge Streets. One grid from 1st to 18th Street (364.1 ft), and a grid from 18th to 24th Street (324.8 ft). Nominal 364 ft and 330 ft. | David: the N-S streets must agree with the grid in the box from Dodge and 24th to Leavenworth and 10th. They were too close together. The anchors were the longest runs, which are outside downtown: 18th Street was 97 ft east of the real street in the box. |
 
 ## Findings
 
 ### The N-S grid
 
 - The mile roads (24th, 36th … 324th) are about 1 mile apart. The median is 5272 ft. The sections change from 127 m to 139 m per number.
-- 12th to 24th Street (downtown) is a separate regular grid at 344.5 ft per number. 6th to 12th Street is 360.2 ft per number. This comes from the original 1854 town plat.
+- Downtown is two grids: 4th to 18th Street at about 364 ft per number, and 18th to 24th Street at about 325 ft. See "Downtown" below. (Before step 15, the output had 6th–12th at 360.2 ft and 12th–24th at 344.5 ft. Those values came from anchors outside downtown, and 344.5 ft was an average of the two grids.)
 - 48th to 60th Street (Benson) does not fit the 1/12-mile grid. In Benson, the numbered streets and the avenues between them make a grid at about 330 ft. 52nd to 60th Street is a regular grid at 331.0 ft per number, except 55th and 57th Streets, which are now moved onto it. 61st to 65th Street also use measured positions, because the 2.2 km run of 65th Street is 63 m off the 1/12-mile grid. David found these results acceptable. He thinks that the cause is how the city developed.
 - 264th to 276th Street: 270th Street is off by half a step, so 264th–270th (138.8 m per number) and 270th–276th (115.6 m per number) are separate sections.
 - North of about 41.30°N, the N-S roads west of 132nd Street move 15–50 m west. The latitude where this starts is not the same on each road (Dodge for 168th, Maple for 144th, Fort for 156th).
@@ -139,13 +141,32 @@ The city was laid out in US survey units (1 chain = 66 ft, 1 mile = 80 chains = 
 | E-W streets | 329.96 ft (16 streets = 5279 ft) | 330 ft = 5 chains = 1/16 mile |
 | N-S numbered streets, 24th–324th | 438.6 ft per number | 440 ft = 1/12 mile |
 | N-S mile sections | median 5272 ft, mean 5263 ft | 5280 ft = 1 mile |
-| Downtown, 12th–24th Street | 344.5 ft | 344 ft = 264 ft block (4 chains) + 80 ft street |
-| Downtown, 6th–12th Street | 360.2 ft | 360 ft |
+| Downtown, 4th–18th Street | 362.1–364.3 ft (by band), 364.1 ft in the output | 364 ft = 264 ft block (4 chains) + 100 ft street |
+| Downtown, 18th–24th Street | 323–340 ft (by band), 324.8 ft in the output | 330 ft = 5 chains |
 | Benson, 52nd–60th Street | 331.0 ft | 330 ft = 5 chains |
 
 - The E-W grid is exact to less than 1 ft per mile.
 - The mile sections are from 5192 ft to 5338 ft, which is within about 1% of a mile. This is usual for chain surveys of the 1850s. 264th–276th Street (5014 ft) contains the jog at 270th Street.
 - The 264 ft block with an 80 ft street is a usual plat layout of the time. I did not verify it against the Omaha town plat records.
+
+### Downtown
+
+These values are from the OSM centerlines. Each street was measured in one latitude band at a time, with only the segments of its main alignment (within 40 ft of the length-weighted median). Then a line was fitted to the positions of the streets.
+
+| Band | Streets | Fit | Largest residual |
+|---|---|---|---|
+| Dodge–Leavenworth | 9th–18th | 363.9 ft | 5 ft |
+| Leavenworth–Pierce | 6th–16th | 364.3 ft | 17 ft |
+| Pierce–Cedar | 3rd–16th | 363.5 ft | 21 ft |
+| Cedar–Gold | 6th–16th | 362.1 ft | 25 ft |
+
+- **4th to 18th Street is one grid at about 364 ft per number.** 12th Street is not a boundary. The 264 ft block with a 100 ft street is my explanation of 364 ft. I did not verify it against the plat records.
+- **18th to 24th Street is irregular.** The fits are 323 ft (Dodge–Leavenworth), 326 ft (Cuming–Dodge) and 340 ft (Pierce–Cedar). 17th and 18th Streets jog south of Leavenworth. North of Dodge, 18th–22nd Street are about 354 ft apart.
+- **The longest runs are outside downtown.** The longest run of 18th Street (3.3 km) is north of Cuming Street and is 116 ft east of 18th Street in the box. The longest runs of 12th and 24th Streets are mostly south of Leavenworth (18 ft and 26 ft from the box).
+- **The streets lean.** 10th, 12th and 16th Streets move 50–65 ft west from Cuming Street south to Vinton Street. A meridian cannot fit all latitudes better than about ±25 ft. The output fits Leavenworth–Dodge exactly. South of Leavenworth (Pierce–Cedar), 3rd–10th Street are 25–46 ft east of their lines.
+- **The subdivision at 13th and Pacific Streets** is cut off from the rest of the city by the railway, and it has its own alignment. David chose to ignore it. Thus the downtown band stops at Leavenworth Street.
+- **1st to 3rd Street.** 3rd Street is on the 364 ft grid (5 ft). 2nd Street is about 60 ft west of its slot. South 1st Street (way 14076453) is only 80 m long, at 41.2288–41.2296°N, south of Vinton Street. It is 603 ft east of 2nd Street at the same latitude, and 77–95 ft east of its slot on the 364 ft grid. 2nd–5th Street south of Vinton are about 300 ft apart. That strip is a different plat, so the output continues the 364 ft grid to 1st Street.
+- 8th Street is 40 ft east of its slot in the Old Market. It is on the grid south of Leavenworth.
 
 ### Main roads and PLSS range lines
 
@@ -202,8 +223,9 @@ Result: inside Douglas County, meridians with a width for each section are a cor
 - Nominal minus regular, N-S: RMS 33 ft over the 330 lines, and at most 55 ft (240th Street), except near 270th Street (239 ft), where the regular grid has the jog. Before the nominal grid was pinned at the range lines, the difference was as much as 443 ft (300th Street).
 - The west columns on the nominal grid are 5191 ft (120th–132nd), 5175 ft (192nd–204th) and 5034 ft (264th–276th).
 - Nominal minus regular, E-W: within 3 ft.
-- Continuation: east of 1st Street 360 ft (measured 360.2 ft), west of 324th Street 440 ft (measured 442.3 ft), north of Girard Street and south of Biden Street 330 ft (measured 330.0 ft).
-- N-S: 1st to 324th Street, with no numbers missing, and the 6 avenues. 1st to 3rd Street continue the downtown step.
+- Downtown, regular minus real in the Leavenworth–Dodge band: within 6 ft for 9th–18th and 24th Street, but 19th (24 ft), 20th (22 ft) and 22nd Street (49 ft) are off the 18th–24th grid. Nominal minus regular: about −10 ft for 1st–18th Street, increasing to −41 ft at 24th Street.
+- Continuation: east of 1st Street 364 ft (measured 364.1 ft), west of 324th Street 440 ft (measured 442.3 ft), north of Girard Street and south of Biden Street 330 ft (measured 330.0 ft).
+- N-S: 1st to 324th Street, with no numbers missing, and the 6 avenues. 1st to 9th Street continue the downtown grid (imputed).
   - The endpoints of the N-S lines are the edges of the grid, not the ends of the streets.
 - E-W, north to south: Girard Street to Harrison Street, then the president streets to Biden Street.
   - The E-W lines go from 72nd Street to 1st Street.
@@ -217,5 +239,6 @@ From `todo`:
 
 Other items:
 
-- 2nd and 3rd Streets in OSM are not on the downtown grid. The output continues the downtown step (360 ft per number) east from 4th Street to 1st Street. 1st Street can be in the Missouri River at some latitudes.
+- 2nd Street and South 1st Street in OSM are not on the downtown grid. The output continues the downtown grid (364 ft per number) east to 1st Street. 1st Street can be in the Missouri River at some latitudes.
+- David will check the downtown grid (1st–18th Street at 364 ft, and 18th–24th Street) on the map.
 - The new output format, the nominal grid, the diagnostics in feet and the new `make_grid_view.py` are not committed.
