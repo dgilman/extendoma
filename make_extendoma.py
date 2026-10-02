@@ -163,7 +163,7 @@ function visible(ax, cLo, cHi, s, anchor) {
   return out;
 }
 
-const map = L.map('map', {worldCopyJump: true, minZoom: 2, renderer: L.canvas()});
+const map = L.map('map', {worldCopyJump: true, minZoom: 2, renderer: L.canvas(), zoomControl: false});
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
@@ -382,6 +382,8 @@ const Panel = L.Control.extend({
   },
 });
 new Panel().addTo(map);
+// Add the zoom buttons after the panel, so that they show below it.
+L.control.zoom().addTo(map);
 
 // Default view: centered on 72nd and Dodge, at the zoom that shows all of Omaha.
 if (!hashChange()) {
