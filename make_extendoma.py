@@ -65,8 +65,7 @@ TEMPLATE = """<!doctype html>
           padding: 1px 6px; font: bold 13px/1.4 sans-serif; white-space: nowrap;
           box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5); }
   #mouse { position: absolute; z-index: 1000; pointer-events: none; }
-  .pin { width: auto !important; height: auto !important; }
-  .pin .dot { width: 10px; height: 10px; margin: -5px 0 4px -5px; border-radius: 50%;
+  .pin .dot { width: 10px; height: 10px; margin: -7px 0 6px -7px; border-radius: 50%;
               background: #2c7669; border: 2px solid #fff; }
 </style>
 </head>
@@ -288,7 +287,7 @@ function setPin(x, updateHash = true) {
   if (pin) pin.remove();
   pin = L.marker(intersectionLatLng(x), {
     interactive: false,
-    icon: L.divIcon({className: 'pin', html: '<div class="dot"></div>' + signs(x.i, x.j)}),
+    icon: L.divIcon({className: 'pin', iconSize: null, html: '<div class="dot"></div>' + signs(x.i, x.j)}),
   }).addTo(map);
   if (updateHash) {
     location.hash = oldHash = '#' + [NS.name(x.i), EW.name(x.j), map.getZoom()]
