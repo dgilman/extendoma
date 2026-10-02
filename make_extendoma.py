@@ -142,11 +142,13 @@ const EW = makeAxis(D.ew, D.north, D.south, -MAX_LAT, MAX_LAT, (i, rows) => {
 
 // Show every s-th line: at s = 1 all lines, else the lines whose key minus
 // anchor is a multiple of s. Powers of 2 keep half the lines when zooming out.
-const NS_STEPS = [1, 2, 3, 6], EW_STEPS = [];
+// There are no steps between 1 and a mile (12 N-S, 16 E-W): they mix thick
+// and thin lines. Thus the map shows all streets or only the mile roads.
+const NS_STEPS = [1], EW_STEPS = [1];
 for (let s = 12; s < 1 << 22; s *= 2) NS_STEPS.push(s);
-for (let s = 1; s < 1 << 22; s *= 2) EW_STEPS.push(s);
+for (let s = 16; s < 1 << 22; s *= 2) EW_STEPS.push(s);
 const NS_ANCHOR = 0, EW_ANCHOR = D.ewAnchor;
-const isMile = {ns: k => k !== null && k > 0 && k % 12 === 0,
+const isMile = {ns: k => k !== null && k % 12 === 0,
                 ew: k => mod(k - EW_ANCHOR, 16) === 0};
 
 // Indices of the lines to draw between coordinates cLo and cHi.
