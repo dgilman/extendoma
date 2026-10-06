@@ -113,9 +113,9 @@ SOUTH_OF = "Harrison Street"  # the artificial E-W streets start south of this
 PRESIDENTS = ("Tyler", "Polk", "Taylor", "Fillmore", "Pierce", "Buchanan",
               "Lincoln", "Johnson", "Grant", "Hayes", "Garfield", "Arthur",
               "Cleveland", "Harrison", "McKinley", "Roosevelt", "Taft",
-              "Wilson", "Harding", "Coolidge", "Hoover", "Roosevelt",
-              "Truman", "Eisenhower", "Kennedy", "Johnson", "Nixon", "Ford",
-              "Carter", "Reagan", "Bush", "Clinton", "Bush", "Obama",
+              "Wilson", "Harding", "Coolidge", "Hoover", "FDR",
+              "Truman", "Eisenhower", "Kennedy", "LBJ", "Nixon", "Ford",
+              "Carter", "Reagan", "Bush", "Clinton", "Dubya", "Obama",
               "Orange Cheeto", "Biden")
 
 NUMBERED = re.compile(r"^(?:North|South) ((\d+)(?:st|nd|rd|th) Street)$")
